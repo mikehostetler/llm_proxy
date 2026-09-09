@@ -14,7 +14,7 @@ defmodule LLMProxy.Stream.EventTest do
         }
       })
 
-    assert event.usage == Usage.new(3, 2, 1, 0)
+    assert event.usage == Usage.new(2, 2, 1, 0)
     assert event.kind == :usage
   end
 

@@ -27,7 +27,7 @@ defmodule LLMProxy.Providers.OpenAICompatibleTest do
         }
       }
 
-      assert OpenAICompatible.extract_usage(response) == Usage.new(200, 50, 120, 0)
+      assert OpenAICompatible.extract_usage(response) == Usage.new(80, 50, 120, 0)
     end
 
     test "handles nil usage" do

@@ -57,6 +57,59 @@ defmodule LLMProxy.Providers.OpenAICodexTest do
     assert opts[:receive_timeout] == :infinity
   end
 
+  test "forwards stable cache identity scoped to the API key for both protocols" do
+    token = %{token: account_token("acct_cache")}
+
+    for {parser, body} <- [
+          {&OpenAICodex.request_from_chat_body/1,
+           %{"messages" => [%{"role" => "user", "content" => "hello"}]}},
+          {&OpenAICodex.request_from_responses_body/1,
+           %{"input" => [%{"role" => "user", "content" => "hello"}]}}
+        ] do
+      {:ok, request} =
+        parser.(
+          Map.merge(body, %{"model" => "gpt-6-astra", "prompt_cache_key" => "client-session"})
+        )
+
+      first = OpenAICodex.generation_opts(request, token, "key-1", true)[:provider_options]
+      repeated = OpenAICodex.generation_opts(request, token, "key-1", false)[:provider_options]
+      other = OpenAICodex.generation_opts(request, token, "key-2", true)[:provider_options]
+      assert first[:prompt_cache_key] == repeated[:prompt_cache_key]
+      assert first[:session_id] == first[:prompt_cache_key]
+      assert first[:prompt_cache_key] != other[:prompt_cache_key]
+      assert byte_size(first[:prompt_cache_key]) == 64
+      {:ok, model} = ReqLLM.model("openai_codex:gpt-6-astra")
+
+      {:ok, wire} =
+        ReqLLM.Providers.OpenAICodex.attach_websocket_stream(
+          model,
+          %ReqLLM.Context{messages: request.messages},
+          OpenAICodex.generation_opts(request, token, "key-1", true)
+        )
+
+      assert wire.canonical_json["prompt_cache_key"] == first[:prompt_cache_key]
+      assert {"session-id", first[:session_id]} in wire.headers
+    end
+  end
+
+  test "metadata session identity works without a cache override" do
+    {:ok, request} =
+      OpenAICodex.request_from_chat_body(%{
+        "model" => "gpt-6-astra",
+        "messages" => [%{"role" => "user", "content" => "hello"}],
+        "metadata" => %{"session_id" => "session", "thread_id" => "thread"}
+      })
+
+    opts =
+      OpenAICodex.generation_opts(request, %{token: account_token("acct_cache")}, "key-1", true)[
+        :provider_options
+      ]
+
+    assert opts[:session_id] == opts[:prompt_cache_key]
+    assert is_binary(opts[:thread_id])
+    refute opts[:thread_id] == opts[:session_id]
+  end
+
   test "buffered Codex options prepare an upstream request" do
     opts =
       OpenAICodex.req_llm_opts(%{token: account_token("acct_123")}, false)

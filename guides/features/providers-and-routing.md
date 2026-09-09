@@ -217,6 +217,26 @@ For standalone services, prefer the live Incant admin action described in [Admin
 
 The release also includes `bin/codex_login` for local or manual recovery. If the release uses exclusive local storage, stop the service before using a separate-VM recovery command.
 
+### Codex session continuity and quota errors
+
+Send a stable `prompt_cache_key` in Chat or Responses requests, or provide
+`metadata.session_id`. Optional `metadata.thread_id` identifies a thread within
+that session. LLMProxy scopes these identities to the authenticated API key
+before forwarding them, sends hyphenated session/thread headers, and keeps
+explicit cache-key overrides distinct from session identity. Requests without
+identity do not share an invented global session. Continuity improves routing
+compatibility but does not guarantee prompt-cache hits.
+
+Codex WebSocket quota envelopes preserve their outer 429 status. A reported
+future `resets_at` drives model-token cooldown and retry delay; otherwise the
+configured cooldown applies. Credentials, arbitrary upstream headers and error
+payloads are not exposed to clients.
+
+The Codex compatibility repair temporarily pins ReqLLM to
+[`dannote/req_llm@69f488da`](https://github.com/dannote/req_llm/commit/69f488da53fdd81452092cbaa5c05cdd4799f24b).
+Return to a released upstream dependency once it includes the session-header
+and prompt-cache-key fixes and passes the same regression tests.
+
 ## Custom protocols
 
 Implement `LLMProxy.Providers.Behaviour` only when the upstream needs a protocol or authentication flow ReqLLM cannot provide:

@@ -32,7 +32,8 @@ defmodule LLMProxy.Usage do
   def from_openai(usage) do
     cache_read = get_in(usage, ["prompt_tokens_details", "cached_tokens"]) || 0
 
-    new(usage["prompt_tokens"] || 0, usage["completion_tokens"] || 0, cache_read)
+    input = max((usage["prompt_tokens"] || 0) - cache_read, 0)
+    new(input, usage["completion_tokens"] || 0, cache_read)
   end
 
   @spec from_responses(map()) :: t()
@@ -56,6 +57,10 @@ defmodule LLMProxy.Usage do
   @spec to_openai(map() | t() | nil) :: map()
   def to_openai(nil), do: %{"prompt_tokens" => 0, "completion_tokens" => 0, "total_tokens" => 0}
 
+  def to_openai(%__MODULE__{} = usage) do
+    usage |> total_input_map() |> to_openai()
+  end
+
   def to_openai(usage) when is_map(usage) do
     input = token_count(usage, :input_tokens)
     output = token_count(usage, :output_tokens)
@@ -71,6 +76,10 @@ defmodule LLMProxy.Usage do
 
   @spec to_responses(map() | t() | nil) :: map()
   def to_responses(nil), do: %{"input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0}
+
+  def to_responses(%__MODULE__{} = usage) do
+    usage |> total_input_map() |> to_responses()
+  end
 
   def to_responses(usage) when is_map(usage) do
     input = token_count(usage, :input_tokens)
@@ -98,6 +107,15 @@ defmodule LLMProxy.Usage do
   @spec put_output_tokens(t(), non_neg_integer()) :: t()
   def put_output_tokens(%__MODULE__{} = usage, output_tokens) do
     %{usage | output_tokens: output_tokens}
+  end
+
+  defp total_input_map(%__MODULE__{} = usage) do
+    usage
+    |> Map.from_struct()
+    |> Map.put(
+      :input_tokens,
+      usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+    )
   end
 
   defp token_count(usage, key, fallback_key \\ nil) do

@@ -76,6 +76,24 @@ defmodule LLMProxy.Providers.ReqLLM.ErrorProjection do
     end
   end
 
+  @doc "Extracts a provider quota reset delay without exposing the error envelope."
+  @spec quota_reset_delay(term(), integer()) :: non_neg_integer() | nil
+  def quota_reset_delay(reason, now_ms \\ System.system_time(:millisecond)) do
+    reason
+    |> error_chain()
+    |> Enum.find_value(fn
+      {:websocket_error_event, event} -> reset_delay(event, now_ms)
+      error -> reset_delay(field(error, :response_body), now_ms)
+    end)
+  end
+
+  defp reset_delay(body, now_ms) do
+    case body |> provider_event_body() |> field(:resets_at) do
+      seconds when is_integer(seconds) and seconds * 1_000 > now_ms -> seconds * 1_000 - now_ms
+      _ -> nil
+    end
+  end
+
   @spec accounting_error() :: t()
   def accounting_error, do: projected_error("Usage accounting failed", "accounting_error", 500)
 
@@ -212,8 +230,9 @@ defmodule LLMProxy.Providers.ReqLLM.ErrorProjection do
        when is_integer(status) and status >= 400 and status <= 599,
        do: status
 
-  defp status({:websocket_error_event, event}) when is_map(event),
-    do: event |> provider_event_body() |> body_status()
+  defp status({:websocket_error_event, event}) when is_map(event) do
+    body_status(event) || quota_status(provider_event_body(event))
+  end
 
   defp status(error) do
     case field(error, :status) || field(error, :status_code) do
@@ -245,6 +264,10 @@ defmodule LLMProxy.Providers.ReqLLM.ErrorProjection do
   defp body_status(%{"error" => error}) when is_map(error), do: body_status(error)
   defp body_status(%{error: error}) when is_map(error), do: body_status(error)
   defp body_status(_body), do: nil
+
+  defp quota_status(body) do
+    if body_code(body) in ["usage_limit_reached", "rate_limit_exceeded"], do: 429
+  end
 
   defp valid_status(status) when status >= 400 and status <= 599, do: status
   defp valid_status(_status), do: nil

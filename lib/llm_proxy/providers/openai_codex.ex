@@ -33,7 +33,7 @@ defmodule LLMProxy.Providers.OpenAICodex do
   def call(body, user_id) do
     with {:ok, request} <- request_from_chat_body(body),
          {:ok, token} <- pick_token(user_id, request.model),
-         {:ok, response} <- generate(request, token, stream?: false) do
+         {:ok, response} <- generate(request, token, user_id, stream?: false) do
       {:ok,
        Result.response(
          ProxyResponse.to_openai_chat_completion(
@@ -53,7 +53,7 @@ defmodule LLMProxy.Providers.OpenAICodex do
   def stream(body, user_id) do
     with {:ok, request} <- request_from_chat_body(body),
          {:ok, token} <- pick_token(user_id, request.model),
-         {:ok, stream_response} <- generate(request, token, stream?: true) do
+         {:ok, stream_response} <- generate(request, token, user_id, stream?: true) do
       {:ok,
        Result.stream(Events.openai_chat_events(stream_response.stream, request.model), token)}
     end
@@ -63,7 +63,7 @@ defmodule LLMProxy.Providers.OpenAICodex do
   def call_native(body, user_id) do
     with {:ok, request} <- request_from_responses_body(body),
          {:ok, token} <- pick_token(user_id, request.model),
-         {:ok, response} <- generate(request, token, stream?: false) do
+         {:ok, response} <- generate(request, token, user_id, stream?: false) do
       {:ok,
        Result.response(
          ProxyResponse.to_responses(response, request.model, System.system_time(:second)),
@@ -76,7 +76,7 @@ defmodule LLMProxy.Providers.OpenAICodex do
   def stream_native(body, user_id) do
     with {:ok, request} <- request_from_responses_body(body),
          {:ok, token} <- pick_token(user_id, request.model),
-         {:ok, stream_response} <- generate(request, token, stream?: true) do
+         {:ok, stream_response} <- generate(request, token, user_id, stream?: true) do
       stream = Stream.map(stream_response.stream, &Events.responses_event/1)
       {:ok, Result.stream(Stream.reject(stream, &is_nil/1), token)}
     end
@@ -86,11 +86,17 @@ defmodule LLMProxy.Providers.OpenAICodex do
   def stream_error(reason, token, model) do
     error = ErrorProjection.project(reason)
 
-    if error.status == 429 and token do
-      TokenPool.mark_rate_limited(token, model, LLMProxy.Config.token_cooldown_ms())
+    retry_after_ms =
+      if error.status == 429 do
+        ErrorProjection.quota_reset_delay(reason) || LLMProxy.Config.token_cooldown_ms()
+      end
+
+    if retry_after_ms && token do
+      TokenPool.mark_rate_limited(token, model, retry_after_ms)
     end
 
     Result.error(error.message, error.status, token,
+      retry_after_ms: retry_after_ms,
       provider_body: %{"error" => ErrorProjection.client_error(reason)}
     )
   end
@@ -184,11 +190,15 @@ defmodule LLMProxy.Providers.OpenAICodex do
   defp normalize_token_refresh({:error, _reason}),
     do: provider_error("OpenAI Codex token refresh failed", 503)
 
-  defp generate(%Request{} = request, token, stream?: false) do
+  defp generate(%LLMProxy.Protocol.Request{} = request, token, user_id, stream?: false) do
     model_spec = "openai_codex:#{request.model}"
     context = %ReqLLM.Context{messages: request.messages}
 
-    case ReqLLM.generate_text(model_spec, context, generation_opts(request, token, false)) do
+    case ReqLLM.generate_text(
+           model_spec,
+           context,
+           generation_opts(request, token, user_id, false)
+         ) do
       {:ok, response} -> {:ok, response}
       {:error, reason} -> {:error, stream_error(reason, token, request.model)}
     end
@@ -197,11 +207,11 @@ defmodule LLMProxy.Providers.OpenAICodex do
       provider_error("OpenAI Codex request failed", 502)
   end
 
-  defp generate(%Request{} = request, token, stream?: true) do
+  defp generate(%LLMProxy.Protocol.Request{} = request, token, user_id, stream?: true) do
     model_spec = "openai_codex:#{request.model}"
     context = %ReqLLM.Context{messages: request.messages}
 
-    case ReqLLM.stream_text(model_spec, context, generation_opts(request, token, true)) do
+    case ReqLLM.stream_text(model_spec, context, generation_opts(request, token, user_id, true)) do
       {:ok, response} -> {:ok, response}
       {:error, reason} -> {:error, stream_error(reason, token, request.model)}
     end
@@ -210,9 +220,11 @@ defmodule LLMProxy.Providers.OpenAICodex do
       provider_error("OpenAI Codex request failed", 502)
   end
 
-  defp generation_opts(%Request{} = request, token, stream?) do
+  @doc false
+  def generation_opts(%Request{} = request, token, user_id, stream?) do
     token
     |> req_llm_opts(stream?)
+    |> Keyword.update!(:provider_options, &session_options(&1, request, user_id))
     |> maybe_put(:tools, ToolSchema.strictify(request.tools))
     |> maybe_put(:tool_choice, request.tool_choice)
     |> maybe_put(:max_tokens, request.max_tokens)
@@ -222,6 +234,24 @@ defmodule LLMProxy.Providers.OpenAICodex do
     |> maybe_put(:stop, request.stop)
     |> maybe_put(:parallel_tool_calls, request.body["parallel_tool_calls"])
   end
+
+  defp session_options(options, request, user_id) do
+    metadata = request.metadata || %{}
+    cache_key = request.body["prompt_cache_key"] || metadata["session_id"]
+    session_id = metadata["session_id"] || cache_key
+
+    options
+    |> maybe_put(:session_id, scoped_identity(user_id, session_id))
+    |> maybe_put(:prompt_cache_key, scoped_identity(user_id, cache_key))
+    |> maybe_put(:thread_id, scoped_identity(user_id, metadata["thread_id"]))
+  end
+
+  defp scoped_identity(user_id, identity) when is_binary(identity) and byte_size(identity) > 0 do
+    :crypto.hash(:sha256, :erlang.term_to_binary({:llm_proxy_codex, user_id, identity}))
+    |> Base.encode16(case: :lower)
+  end
+
+  defp scoped_identity(_user_id, _identity), do: nil
 
   defp maybe_put(list, _key, nil) when is_list(list), do: list
   defp maybe_put(list, key, value) when is_list(list), do: Keyword.put(list, key, value)
