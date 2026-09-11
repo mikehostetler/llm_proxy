@@ -13,18 +13,7 @@ defmodule LLMProxy.ProviderUsage.HTTP do
     with {:ok, url} <- url(source.base_url, path) do
       timeout = LLMProxy.Config.provider_usage_request_timeout_ms()
 
-      request =
-        LLMProxy.HTTP.new(
-          url: url,
-          headers: headers,
-          connect_options: [timeout: timeout],
-          receive_timeout: timeout,
-          finch: [pool_timeout: timeout],
-          retry: false,
-          redirect: false,
-          decode_body: false,
-          into: &collect_body/2
-        )
+      request = build_request(url, headers, timeout)
 
       case Req.get(request) do
         {:ok, %{private: %{@response_too_large_key => true}}} ->
@@ -40,6 +29,20 @@ defmodule LLMProxy.ProviderUsage.HTTP do
           {:error, exception_error(exception)}
       end
     end
+  end
+
+  @doc false
+  def build_request(url, headers, timeout) do
+    LLMProxy.HTTP.new(
+      url: url,
+      headers: headers,
+      receive_timeout: timeout,
+      finch: [conn_opts: [transport_opts: [timeout: timeout]], pool_timeout: timeout],
+      retry: false,
+      redirect: false,
+      decode_body: false,
+      into: &collect_body/2
+    )
   end
 
   defp collect_body({:data, data}, {request, response}) when is_binary(data) do

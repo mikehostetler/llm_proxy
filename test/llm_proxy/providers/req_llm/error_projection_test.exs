@@ -92,6 +92,56 @@ defmodule LLMProxy.Providers.ReqLLM.ErrorProjectionTest do
     refute Jason.encode!(ErrorProjection.client_error(stream_error)) =~ "private request"
   end
 
+  test "preserves outer WebSocket quota status without exposing headers" do
+    event =
+      {:websocket_error_event,
+       %{
+         "type" => "error",
+         "status" => 429,
+         "error" => %{
+           "type" => "usage_limit_reached",
+           "message" => "The usage limit has been reached"
+         },
+         "headers" => %{"set-cookie" => "secret-cookie"}
+       }}
+
+    wrapped = APIStreamError.exception(reason: "stream failed", cause: event)
+
+    assert ErrorProjection.project(wrapped) == %{
+             message: "The usage limit has been reached",
+             code: "usage_limit_reached",
+             status: 429
+           }
+
+    assert ErrorProjection.replay_safety(wrapped) == :safe
+    refute inspect(ErrorProjection.client_error(wrapped)) =~ "secret-cookie"
+  end
+
+  test "recognizes status-less quota errors but respects explicit error status" do
+    event = %{"error" => %{"code" => "usage_limit_reached", "message" => "Limit reached"}}
+    assert ErrorProjection.project({:websocket_error_event, event}).status == 429
+
+    assert ErrorProjection.project({:websocket_error_event, Map.put(event, "status", 403)}).status ==
+             403
+  end
+
+  test "extracts a future quota reset from the structured cause" do
+    event =
+      {:websocket_error_event,
+       %{
+         "status" => 429,
+         "error" => %{
+           "type" => "usage_limit_reached",
+           "resets_at" => 1_800_000_010
+         }
+       }}
+
+    wrapped = APIStreamError.exception(reason: "stream failed", cause: event)
+    assert ErrorProjection.quota_reset_delay(wrapped, 1_800_000_000_000) == 10_000
+    assert ErrorProjection.quota_reset_delay(wrapped, 1_800_000_020_000) == nil
+    assert ErrorProjection.quota_reset_delay(:unknown, 1_800_000_000_000) == nil
+  end
+
   test "rejects unsafe WebSocket provider error fields" do
     event =
       {:websocket_error_event,

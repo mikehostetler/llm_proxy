@@ -210,7 +210,7 @@ defmodule LLMProxy.Protocol.OpenAITest do
       }
 
       assert OpenAI.extract_usage(response) ==
-               Usage.new(100, 50, 20, 0)
+               Usage.new(80, 50, 20, 0)
     end
 
     test "handles missing usage" do

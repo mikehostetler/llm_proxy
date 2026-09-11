@@ -1,7 +1,7 @@
 defmodule LLMProxy.TokenPool.ServerTest do
   use ExUnit.Case
 
-  alias LLMProxy.Providers.Result
+  alias LLMProxy.Providers.{OpenAICodex, Result}
   alias LLMProxy.ProviderUsage.Snapshot
   alias LLMProxy.Schemas.ProviderTokenCooldown
   alias LLMProxy.Storage
@@ -123,6 +123,29 @@ defmodule LLMProxy.TokenPool.ServerTest do
 
     assert {:ok, recovered} = Server.pick_token("openai-codex", "user-1")
     assert recovered.id == primary.id
+  end
+
+  test "Codex outer quota errors persist a cooldown until the provider reset" do
+    {:ok, token} = Storage.add_token("openai-codex", "oauth", "synthetic-token")
+    resets_at = System.system_time(:second) + 60
+
+    event =
+      {:websocket_error_event,
+       %{
+         "status" => 429,
+         "error" => %{
+           "type" => "usage_limit_reached",
+           "message" => "Limit reached",
+           "resets_at" => resets_at
+         }
+       }}
+
+    result = OpenAICodex.stream_error(event, token, "gpt-6-astra")
+    assert result.status == 429
+    assert result.retry_after_ms in 58_000..60_000
+    assert [%ProviderTokenCooldown{available_at: available_at}] = Repo.all(ProviderTokenCooldown)
+    assert DateTime.to_unix(available_at) == resets_at
+    assert {:error, _} = Server.pick_token("openai-codex", "user-1", "gpt-6-astra")
   end
 
   test "model cooldown does not block the same account for other models" do

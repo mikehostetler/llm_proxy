@@ -65,6 +65,17 @@ Supported metrics:
 - `:cache_write_tokens`
 - `:concurrent_requests`
 
+Accounting `input_tokens` excludes separately counted cache reads/writes. OpenAI
+wire `prompt_tokens` and Responses `input_tokens` include cached input; LLMProxy
+normalizes these once before calculating cost and restores the total when
+rendering its internal usage structs back to those protocols. Raw ReqLLM usage
+maps already contain wire-total input and are not incremented again.
+
+The Codex accounting repair does not rewrite historical rows or lifetime key
+counters. Older Chat rows may count cached input both as regular input and as
+cache reads, inflating their estimated cost. Do not infer a provider quota
+improvement solely from a drop in proxy cost estimates after upgrading.
+
 Supported windows:
 
 - `:minute`
