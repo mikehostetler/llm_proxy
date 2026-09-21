@@ -12,10 +12,14 @@ defmodule LLMProxy.ProviderTest do
   alias LLMProxy.TestSupport
 
   defmodule Provider do
+    alias LLMProxy.Protocol.Request
+
     def name, do: "req-llm-provider-test"
     def models, do: ["req-llm-provider-model"]
 
-    def call(%{"model" => "req-llm-provider-model", "messages" => _messages}, _user_id) do
+    def call(%{"model" => "req-llm-provider-model", "messages" => _messages} = body, _user_id) do
+      {:ok, %Request{messages: [_message]}} = Request.parse(:openai_chat, body)
+
       {:ok,
        Result.response(
          %{
@@ -171,6 +175,34 @@ defmodule LLMProxy.ProviderTest do
     [updated_key] = Storage.list_keys()
     assert updated_key.input_tokens == 4
     assert updated_key.output_tokens == 3
+  end
+
+  test "ReqLLM provider encodes messages and tools as OpenAI wire data" do
+    tool =
+      ReqLLM.Tool.new!(
+        name: "lookup",
+        description: "Look up a value",
+        parameter_schema: [query: [type: :string, required: true]],
+        callback: fn _arguments -> {:ok, "found"} end
+      )
+
+    assert {:ok, %Request{body: body}} =
+             LLMProxy.Provider.chat_request("hello",
+               model: "req-llm-provider-model",
+               tools: [tool]
+             )
+
+    assert %{
+             "messages" => [%{"role" => "user", "content" => "hello"}],
+             "tools" => [
+               %{
+                 "type" => "function",
+                 "function" => %{"name" => "lookup", "parameters" => %{"type" => "object"}}
+               }
+             ]
+           } = body
+
+    assert {:ok, %Request{messages: [_message]}} = Request.parse(:openai_chat, body)
   end
 
   test "local and ReqLLM calls share the concurrent-request limit" do

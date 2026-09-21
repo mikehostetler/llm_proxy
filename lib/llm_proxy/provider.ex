@@ -182,10 +182,15 @@ defmodule LLMProxy.Provider do
   end
 
   defp request_body(messages, opts) do
-    %{"model" => Keyword.fetch!(opts, :model), "messages" => messages}
+    model = Keyword.fetch!(opts, :model)
+
+    %ReqLLM.Context{messages: messages}
+    |> ReqLLMDefaults.encode_context_to_openai_format(model)
+    |> LLMProxy.Protocol.stringify_keys()
+    |> Map.put("model", model)
     |> put_if_present("stream", Keyword.get(opts, :stream))
     |> put_if_present("metadata", Keyword.get(opts, :metadata))
-    |> put_if_present("tools", Keyword.get(opts, :tools))
+    |> put_if_present("tools", openai_tools(Keyword.get(opts, :tools)))
     |> put_if_present("tool_choice", Keyword.get(opts, :tool_choice))
     |> put_if_present("max_tokens", Keyword.get(opts, :max_tokens))
     |> put_if_present("temperature", Keyword.get(opts, :temperature))
@@ -195,6 +200,15 @@ defmodule LLMProxy.Provider do
 
   defp put_if_present(map, _key, nil), do: map
   defp put_if_present(map, key, value), do: Map.put(map, key, value)
+
+  defp openai_tools(nil), do: nil
+
+  defp openai_tools(tools) when is_list(tools) do
+    Enum.map(tools, fn
+      %ReqLLM.Tool{} = tool -> ReqLLM.Tool.to_schema(tool, :openai)
+      tool -> tool
+    end)
+  end
 
   defp normalize_actor(%Actor{} = actor), do: {:ok, actor}
   defp normalize_actor(%{id: _id} = api_key), do: {:ok, Actor.from_api_key(api_key)}
