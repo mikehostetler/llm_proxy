@@ -19,6 +19,7 @@ defmodule LLMProxy.Provider do
   alias LLMProxy.GuardrailPipeline
   alias LLMProxy.HTTP.ErrorResponse
   alias LLMProxy.Protocol.Request
+  alias LLMProxy.Provider.ReqLLMStream
   alias LLMProxy.Providers.{Attempt, Execution, Registry, Result}
   alias LLMProxy.Response
   alias LLMProxy.Stream.Event
@@ -153,6 +154,25 @@ defmodule LLMProxy.Provider do
 
   @impl ReqLLM.Provider
   def decode_response(request_response), do: request_response
+
+  @impl ReqLLM.Provider
+  def stream_transport(_model, _opts), do: :in_process
+
+  @impl ReqLLM.Provider
+  def attach_in_process_stream(model, context, opts) do
+    request_opts =
+      opts
+      |> Keyword.put(:model, model_id(model))
+      |> Keyword.put(:stream, true)
+
+    actor_or_key = Keyword.get(opts, :actor) || Keyword.get(opts, :api_key)
+
+    with {:ok, request} <- chat_request(context, request_opts),
+         {:ok, %Result{kind: :stream} = result} <-
+           stream(request, actor_or_key, Keyword.put(opts, :route, :req_llm)) do
+      {:ok, ReqLLMStream.new(result, model)}
+    end
+  end
 
   defp model_id(%{model: model}) when is_binary(model), do: model
   defp model_id(%{id: id}) when is_binary(id), do: id
